@@ -29,26 +29,57 @@ for. Everything here was run end to end on a real OpenShift cluster on
 
 ---
 
+## 0. Quick path
+
+If you just want it working on an OpenShift cluster on AWS:
+
+```bash
+oc apply -f deploy/00-operators.yaml          # NHC + FAR, wait for Succeeded
+AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
+  CLUSTER_TAG=kubernetes.io/cluster/<infra-id>=owned REGION=us-east-1 \
+  ./deploy/build-and-deploy.sh                # builds and deploys the emulator
+# edit the node -> instance mapping, then:
+oc apply -f far-redfish-aws-template.yaml
+```
+
+Your infra ID comes from `oc get infrastructure cluster -o
+jsonpath='{.status.infrastructureName}'`.
+
+The rest of this file explains what those steps do and what to watch out
+for.
+
 ## 1. Where to run the emulator
 
 **Not on a node it might be asked to fence.** It would kill itself part-way
-through the operation. A small separate instance is simplest.
+through the operation.
 
-It must be reachable over the network from the FAR pod, since that is where
-the fence agent actually runs.
+`deploy/10-emulator.yaml` runs it in the cluster, pinned to a control-plane
+node, and the FAR template only ever lists workers — so it can never be
+asked to power off its own host. A separate EC2 instance outside the cluster
+works too and survives cluster rebuilds; then point the template's `--ip` at
+that address instead of the Service.
+
+Either way it must be reachable from the FAR pod, since that is where the
+fence agent actually runs.
 
 ## 2. Credentials
 
-Attach an IAM role to the emulator's instance and let `boto3` pick it up. Do
-not put keys in the emulator config or in any command line — the driver never
-reads credentials from its own config, by design.
+The driver never reads credentials from its own config, by design — `boto3`
+resolves them. On a standalone EC2 instance, attach an IAM role and nothing
+else is needed. In-cluster there is no instance role to borrow, so
+`build-and-deploy.sh` puts an access key in a Secret; use a dedicated IAM
+user for it, not your own.
 
 `iam-policy.json` holds the minimal policy. It allows power control only on
-instances tagged `rhwa-lab=true`; change the tag to match your lab. Note that
-`ec2:DescribeInstances` cannot be restricted by resource tag — AWS does not
-support resource-level permissions for it — so it is granted on `*`.
+instances carrying a given tag — change the tag to match your cluster, e.g.
+`kubernetes.io/cluster/<infra-id>: owned`. Note that `ec2:DescribeInstances`
+cannot be restricted by resource tag — AWS does not support resource-level
+permissions for it — so it is granted on `*`.
 
-## 3. Install and run
+## 3. Running it standalone
+
+`deploy/build-and-deploy.sh` covers the in-cluster case. To run it on a
+plain host instead:
 
 ```bash
 git clone -b aws-systems-driver https://github.com/RanWurmbrand/sushy-tools

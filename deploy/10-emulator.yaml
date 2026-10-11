@@ -1,0 +1,64 @@
+# The sushy-tools emulator, running the AWS driver.
+#
+# Depends on three objects that carry environment-specific data and so are
+# created by build.sh rather than checked in:
+#   secret/sushy-aws-creds        AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
+#   secret/sushy-emulator-tls     self-signed cert and key
+#   configmap/sushy-emulator-config   aws.conf (region and tag filter)
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sushy-emulator
+  namespace: openshift-workload-availability
+  labels: {app: sushy-emulator}
+spec:
+  replicas: 1
+  selector:
+    matchLabels: {app: sushy-emulator}
+  template:
+    metadata:
+      labels: {app: sushy-emulator}
+    spec:
+      # Pin to a control-plane node. The FAR template only ever fences
+      # workers, so the emulator can never be asked to power off its own
+      # host and kill itself part-way through a fence.
+      nodeSelector:
+        node-role.kubernetes.io/control-plane: ""
+      tolerations:
+        - key: node-role.kubernetes.io/master
+          operator: Exists
+          effect: NoSchedule
+      containers:
+        - name: sushy-emulator
+          image: image-registry.openshift-image-registry.svc:5000/openshift-workload-availability/sushy-emulator:latest
+          ports:
+            - containerPort: 8000
+          envFrom:
+            - secretRef: {name: sushy-aws-creds}
+          env:
+            - name: AWS_DEFAULT_REGION
+              value: us-east-1
+          volumeMounts:
+            - {name: config, mountPath: /etc/sushy}
+            - {name: tls, mountPath: /etc/sushy/tls}
+          readinessProbe:
+            httpGet: {path: /redfish/v1, port: 8000, scheme: HTTPS}
+            initialDelaySeconds: 5
+            periodSeconds: 10
+      volumes:
+        - name: config
+          configMap: {name: sushy-emulator-config}
+        - name: tls
+          secret: {secretName: sushy-emulator-tls}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: sushy-emulator
+  namespace: openshift-workload-availability
+spec:
+  selector: {app: sushy-emulator}
+  ports:
+    - port: 8000
+      targetPort: 8000
