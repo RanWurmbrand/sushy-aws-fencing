@@ -1,10 +1,10 @@
-# Fencing EC2 nodes with sushy-tools and FAR
+# Redfish power control for EC2 instances
 
-FAR (Fence Agents Remediation) fences a sick node by talking to its BMC. AWS
-gives you no BMC. This makes each EC2 instance *look like* it has one:
+EC2 gives you no BMC. This makes each instance *look like* it has one, so
+anything that speaks Redfish can power it on and off:
 
 ```
-FAR  ->  fence_redfish  ->  sushy-tools (speaks Redfish)  ->  AWS driver  ->  EC2 API
+Redfish client  ->  sushy-tools (speaks Redfish)  ->  AWS driver  ->  EC2 API
 ```
 
 The driver is an addition to upstream
@@ -19,48 +19,49 @@ The driver is an addition to upstream
 | `sushy_tools/emulator/main.py` | `--aws` / `--aws-region` wiring |
 | `doc/source/user/dynamic-emulator.rst` | user docs |
 
-This repo holds the deployment side: the FAR template, the IAM policy, and
-the runbook below — including timings measured against real EC2, which is
-the part you cannot get from documentation.
+This repo holds the deployment side: how to run the emulator, a minimal IAM
+policy, and the runbook below — including timings measured against real
+EC2, which is the part you cannot get from documentation.
 
-Only power control is implemented, because that is all a fence agent asks
-for. Everything here was run end to end on a real OpenShift cluster on
-2026-09-30; that cluster has since been destroyed.
+**Only power control is implemented.** No virtual media, BIOS, storage or
+boot device selection. That is enough for a fence agent, and not enough to
+provision a machine.
+
+> Want automated node fencing on OpenShift with NHC and FAR? That sits on
+> top of this and lives on the
+> [`far-fencing`](https://github.com/RanWurmbrand/sushy-aws-fencing/tree/far-fencing)
+> branch: operator subscriptions, a FenceAgentsRemediationTemplate, and a
+> recorded end-to-end fence of a real node.
 
 ---
 
 ## 0. Quick path
 
-If you just want it working on an OpenShift cluster on AWS:
+To run the emulator inside an OpenShift cluster on AWS:
 
 ```bash
-oc apply -f deploy/00-operators.yaml          # NHC + FAR, wait for Succeeded
 AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
   CLUSTER_TAG=kubernetes.io/cluster/<infra-id>=owned REGION=us-east-1 \
-  ./deploy/build-and-deploy.sh                # builds and deploys the emulator
-# edit the node -> instance mapping, then:
-oc apply -f far-redfish-aws-template.yaml
+  ./deploy/build-and-deploy.sh
 ```
 
 Your infra ID comes from `oc get infrastructure cluster -o
-jsonpath='{.status.infrastructureName}'`.
+jsonpath='{.status.infrastructureName}'`. `CLUSTER_TAG` is just a filter —
+any tag works; it decides which instances are exposed as Redfish systems.
 
-The rest of this file explains what those steps do and what to watch out
-for.
+To run it on a plain host instead, see section 3.
 
 ## 1. Where to run the emulator
 
-**Not on a node it might be asked to fence.** It would kill itself part-way
-through the operation.
+**Not on a machine it might be asked to power off.** It would kill itself
+part-way through the operation.
 
-`deploy/10-emulator.yaml` runs it in the cluster, pinned to a control-plane
-node, and the FAR template only ever lists workers — so it can never be
-asked to power off its own host. A separate EC2 instance outside the cluster
-works too and survives cluster rebuilds; then point the template's `--ip` at
-that address instead of the Service.
+`deploy/10-emulator.yaml` runs it in the cluster pinned to a control-plane
+node, so as long as you only ever power-cycle workers it is safe. A separate
+EC2 instance outside the cluster works too and survives cluster rebuilds.
 
-Either way it must be reachable from the FAR pod, since that is where the
-fence agent actually runs.
+Either way it has to be reachable from whatever will be making the Redfish
+calls.
 
 ## 2. Credentials
 
@@ -128,7 +129,7 @@ default `--power-timeout` of 20 would have failed two of those four runs, so
 `60`, which leaves good headroom over the worst case observed.
 
 Powering on is quick and consistent, so the off phase dominates. A full
-reboot — what FAR does by default — should be budgeted at roughly 40 s worst
+reboot — off then on — should be budgeted at roughly 40 s worst
 case, comfortably inside the template's `timeout: 120s` for a single agent
 run.
 
@@ -144,15 +145,14 @@ $FR -o status          # expect: Status: ON
 time $FR -o off        # <-- record this; expect: Success: Powered OFF
 $FR -o status          # expect: Status: OFF
 time $FR -o on         # expect: Success: Powered ON
-time $FR -o reboot     # off, poll, on -- the path FAR actually takes
+time $FR -o reboot     # off, poll, on -- what a fencing reboot does
 ```
 
 All five must exit 0.
 
 **If `off` takes more than ~20 seconds**, the agent's default
-`--power-timeout` of 20 is too short. `far-redfish-aws-template.yaml` already
-sets it to 60; adjust it to what you measured, and keep the CR's `timeout`
-comfortably above the off + on total, since both happen in a single agent run.
+`--power-timeout` of 20 is too short. Pass a larger value; 60 leaves
+headroom over the worst case measured here.
 
 Useful cross-check against the raw API, to separate driver latency from EC2
 latency:
@@ -160,76 +160,6 @@ latency:
 ```bash
 time aws ec2 stop-instances --instance-ids $IID --force --skip-os-shutdown
 ```
-
-## 5. Wire up FAR
-
-```bash
-oc apply -f far-redfish-aws-template.yaml
-```
-
-Fill in `<EMULATOR-IP>` and the node-to-instance mapping first. Get the
-mapping from each node's `providerID`, which embeds the instance ID:
-
-```bash
-oc get nodes -o jsonpath='{range .items[*]}{.metadata.name}{"\t"}{.spec.providerID}{"\n"}{end}'
-# worker-0    aws:///us-east-1a/i-0123456789abcdef0
-```
-
-The per-node `--systems-uri` is not optional: `fence_redfish` discovers
-systems by listing `/redfish/v1/Systems` and taking the **last** entry, so
-without it every node would fence whichever instance happens to sort last.
-
-The FAR template controller validates a template by running
-`fence_redfish --action status` for each node listed, so a wrong instance ID
-or an unreachable emulator shows up as soon as you apply it, not at fencing
-time.
-
-## 6. Fence a node for real
-
-Create a FenceAgentsRemediation CR named after the node — that is how FAR
-picks its target. `far-cr-example.yaml` is a worked example; edit the node
-name and instance ID, then:
-
-```bash
-oc apply -f far-cr-example.yaml
-oc get far -n openshift-workload-availability -w
-oc get nodes -w
-```
-
-In normal operation you would not create this by hand — NHC creates it for
-you when a node goes unhealthy. Doing it manually is just the quickest way
-to prove the path works.
-
-### Result, 2026-09-30
-
-Fenced one worker on a 3-master/3-worker OpenShift cluster in `us-west-2`.
-It worked end to end:
-
-```
-Processing=False                 RemediationFinishedSuccessfully
-FenceAgentActionSucceeded=True   FenceAgentSucceeded
-Succeeded=True                   RemediationFinishedSuccessfully
-```
-
-The emulator log shows exactly the sequence `fence_redfish` is supposed to
-produce for a reboot, and nothing else:
-
-```
-10:45:29  POST .../ComputerSystem.Reset   204   <- ForceOff
-10:45:30  GET  .../Systems/i-0123...      200   <- poll, ~1/s
-   ...    (14 seconds of polling)
-10:45:43  POST .../ComputerSystem.Reset   204   <- On
-```
-
-Off phase took 14 s that run, inside the 11–30 s range measured above.
-FAR then applied `node.kubernetes.io/out-of-service:NoExecute`, pod count on
-the node dropped 27 → 13 (only DaemonSets and static pods left), the
-`image-registry` Deployment pod rescheduled onto another worker, and zero
-pods were left Pending cluster-wide. No cluster operator went Degraded. The
-node returned to `Ready` about 5 minutes after the reboot.
-
-Deleting the FAR CR afterwards removes the out-of-service taint and puts the
-node back in service.
 
 ---
 

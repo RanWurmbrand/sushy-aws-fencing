@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # Build the emulator image inside the cluster and deploy it.
 #
-# Assumes you are logged in with `oc`, the internal image registry is
-# Managed, and 00-operators.yaml has already been applied.
+# Assumes you are logged in with `oc` and the internal image registry is
+# Managed. Creates the namespace if it is missing.
 #
 # Usage:
 #   AWS_ACCESS_KEY_ID=... AWS_SECRET_ACCESS_KEY=... \
@@ -10,11 +10,13 @@
 #   REGION=us-east-1 ./build-and-deploy.sh
 set -euo pipefail
 
-NS=openshift-workload-availability
+NS="${NS:-sushy-emulator}"
 REGION="${REGION:-us-east-1}"
 CLUSTER_TAG="${CLUSTER_TAG:?set CLUSTER_TAG, e.g. kubernetes.io/cluster/mycluster-abcde=owned}"
 : "${AWS_ACCESS_KEY_ID:?}" "${AWS_SECRET_ACCESS_KEY:?}"
 SRC="${SRC:-$(pwd)/sushy-tools}"
+
+oc get namespace "$NS" >/dev/null 2>&1 || oc create namespace "$NS"
 
 if [ ! -d "$SRC/.git" ]; then
   echo "Cloning the driver branch into $SRC"
@@ -61,7 +63,8 @@ oc get buildconfig sushy-emulator -n "$NS" >/dev/null 2>&1 || \
   oc new-build --binary --name=sushy-emulator --strategy=docker -n "$NS"
 oc start-build sushy-emulator --from-dir="$WORK" --follow -n "$NS"
 
-sed "s|value: us-east-1|value: $REGION|" "$(dirname "$0")/10-emulator.yaml" | oc apply -f -
+sed -e "s|__NAMESPACE__|$NS|g" -e "s|value: us-east-1|value: $REGION|" \
+  "$(dirname "$0")/10-emulator.yaml" | oc apply -f -
 oc rollout restart deploy/sushy-emulator -n "$NS"
 oc rollout status deploy/sushy-emulator -n "$NS"
 

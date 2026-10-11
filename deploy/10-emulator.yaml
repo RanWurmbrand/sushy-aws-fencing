@@ -2,6 +2,8 @@
 #
 # Depends on three objects that carry environment-specific data and so are
 # created by build.sh rather than checked in:
+# __NAMESPACE__ is substituted by build-and-deploy.sh.
+#
 #   secret/sushy-aws-creds        AWS_ACCESS_KEY_ID + AWS_SECRET_ACCESS_KEY
 #   secret/sushy-emulator-tls     self-signed cert and key
 #   configmap/sushy-emulator-config   aws.conf (region and tag filter)
@@ -10,7 +12,7 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: sushy-emulator
-  namespace: openshift-workload-availability
+  namespace: __NAMESPACE__
   labels: {app: sushy-emulator}
 spec:
   replicas: 1
@@ -20,9 +22,9 @@ spec:
     metadata:
       labels: {app: sushy-emulator}
     spec:
-      # Pin to a control-plane node. The FAR template only ever fences
-      # workers, so the emulator can never be asked to power off its own
-      # host and kill itself part-way through a fence.
+      # Pin to a control-plane node. As long as you only ever power-cycle
+      # workers, the emulator can never be asked to power off its own host
+      # and kill itself part-way through the operation.
       nodeSelector:
         node-role.kubernetes.io/control-plane: ""
       tolerations:
@@ -31,7 +33,7 @@ spec:
           effect: NoSchedule
       containers:
         - name: sushy-emulator
-          image: image-registry.openshift-image-registry.svc:5000/openshift-workload-availability/sushy-emulator:latest
+          image: image-registry.openshift-image-registry.svc:5000/__NAMESPACE__/sushy-emulator:latest
           ports:
             - containerPort: 8000
           envFrom:
@@ -56,7 +58,7 @@ apiVersion: v1
 kind: Service
 metadata:
   name: sushy-emulator
-  namespace: openshift-workload-availability
+  namespace: __NAMESPACE__
 spec:
   selector: {app: sushy-emulator}
   ports:
