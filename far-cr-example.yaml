@@ -1,0 +1,31 @@
+# Fences a single node, by hand. NHC normally creates this for you when a
+# node goes unhealthy; doing it manually is the quickest way to prove the
+# path works end to end.
+#
+# The CR name must be the node name: that is how FAR picks its target.
+# Replace the node name and the instance ID with your own.
+apiVersion: fence-agents-remediation.medik8s.io/v1alpha1
+kind: FenceAgentsRemediation
+metadata:
+  name: ip-10-0-0-1.us-east-1.compute.internal
+  namespace: openshift-workload-availability
+spec:
+  agent: fence_redfish
+  remediationStrategy: OutOfServiceTaint
+  retrycount: 5
+  retryinterval: "5s"
+  timeout: "120s"
+  sharedparameters:
+    --ip: "sushy-emulator.openshift-workload-availability.svc"
+    --ipport: "8000"
+    --ssl-insecure: ""
+    # The emulator is unauthenticated, but fence_redfish insists on being
+    # given a username and password, so these are placeholders.
+    --username: "admin"
+    --password: "admin"
+    # Measured: a force-stop takes 11-30s, so the agent's default of 20
+    # is not enough.
+    --power-timeout: "60"
+  nodeparameters:
+    --systems-uri:
+      ip-10-0-0-1.us-east-1.compute.internal: "/redfish/v1/Systems/i-0123456789abcdef0"
